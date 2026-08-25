@@ -49,13 +49,31 @@ XPATH_BOTAO_ACEITAR_COOKIES = "//button[@data-cky-tag='accept-button']"
 
 
 def criar_driver() -> webdriver.Chrome:
-    """Cria e configura uma instância headless do Chrome."""
+    """Cria e configura uma instância headless do Chrome.
+
+    Inclui flags extras (--disable-gpu, --disable-extensions,
+    --disable-background-networking) para reduzir instabilidade em
+    ambientes com recursos limitados, como runners do GitHub Actions,
+    onde o Chrome headless às vezes trava/some sem erro claro.
+
+    Também define um timeout explícito de carregamento de página
+    (30s) — sem isso, se o Chrome travar de verdade, o Selenium só
+    percebe depois de ~120s (timeout padrão da conexão HTTP local
+    entre Selenium e ChromeDriver), o que deixa o diagnóstico bem
+    mais lento e confuso.
+    """
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    return webdriver.Chrome(options=options)
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-background-networking")
+
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(30)
+    return driver
 
 
 def _data_hoje_iso() -> str:
@@ -139,21 +157,16 @@ def _preencher_e_submeter(driver: webdriver.Chrome, restaurante_value: str, refe
     )
     driver.execute_script("arguments[0].click();", botao)
 
-    # Espera até #resultado receber ALGUM conteúdo novo (o JS do site sempre
-    # faz resultadoDiv.innerHTML = '' e depois insere algo — um <h3> quando
-    # há cardápio, ou uma <div></div> vazia / <p> quando não há cardápio
-    # cadastrado para essa refeição/dia). Não esperamos especificamente por
-    # "h3" aqui, porque "sem cardápio" é um resultado válido, não uma falha:
-    # quem chama essa função é quem decide o que fazer nesse caso.
+    # Espera até o resultado ser preenchido de fato (não só existir vazio no DOM)
     try:
         WebDriverWait(driver, TIMEOUT_PADRAO).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "#resultado > *"))
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#resultado h3"))
         )
     except Exception:
-        # Isso aqui sim é uma falha real (site fora do ar, JS quebrado,
-        # caiu na página errada etc.) — nada apareceu dentro do timeout.
-        # DEBUG: salva screenshot + HTML antes de propagar o erro, assim dá
-        # pra investigar exatamente o que a página estava mostrando.
+        # DEBUG: se travou, salva screenshot + HTML antes de propagar o erro,
+        # assim dá pra investigar exatamente o que a página estava mostrando.
+        # Também checamos o título da página: se caiu na busca do site por
+        # engano, isso aparece claro na mensagem de erro.
         _salvar_debug(driver, motivo=f"timeout_{refeicao}")
         titulo_atual = driver.title
         raise RuntimeError(
@@ -163,48 +176,37 @@ def _preencher_e_submeter(driver: webdriver.Chrome, restaurante_value: str, refe
         )
 
 
-def buscar_html_cardapio(restaurante_value: str, refeicao: str) -> str | None:
+def buscar_html_cardapio(restaurante_value: str, refeicao: str) -> str:
     """Busca o HTML do resultado para UMA refeição (Almoço OU Jantar).
     Abre e fecha o navegador nessa única consulta.
     Útil para testes isolados ou quando você só precisa de uma refeição.
-
-    Retorna None se o restaurante não tiver essa refeição cadastrada para
-    hoje (ex: um RU que só serve Almoço) — isso não é um erro.
     """
     driver = criar_driver()
     try:
         _preencher_e_submeter(driver, restaurante_value, refeicao)
         resultado = driver.find_element(By.ID, "resultado")
-        if not resultado.find_elements(By.TAG_NAME, "h3"):
-            return None
         return resultado.get_attribute("outerHTML")
     finally:
         driver.quit()
 
 
-def buscar_cardapio_completo(restaurante_value: str) -> dict[str, str | None]:
+def buscar_cardapio_completo(restaurante_value: str) -> dict[str, str]:
     """Busca o HTML do resultado para Almoço E Jantar, reaproveitando
     a mesma instância do navegador (evita abrir/fechar o Chrome duas vezes).
-
-    Cada refeição é buscada de forma independente: se uma não tiver
-    cardápio cadastrado hoje (valor None), isso não impede a busca da outra.
 
     Retorna um dicionário como:
         {
             "Almoço": "<div id='resultado'>...</div>",
-            "Jantar": None,  # não há Jantar cadastrado hoje para esse RU
+            "Jantar": "<div id='resultado'>...</div>",
         }
     """
     driver = criar_driver()
-    resultados: dict[str, str | None] = {}
+    resultados: dict[str, str] = {}
     try:
         for refeicao in REFEICOES:
             _preencher_e_submeter(driver, restaurante_value, refeicao)
             resultado = driver.find_element(By.ID, "resultado")
-            if not resultado.find_elements(By.TAG_NAME, "h3"):
-                resultados[refeicao] = None
-            else:
-                resultados[refeicao] = resultado.get_attribute("outerHTML")
+            resultados[refeicao] = resultado.get_attribute("outerHTML")
     finally:
         driver.quit()
 
@@ -212,14 +214,11 @@ def buscar_cardapio_completo(restaurante_value: str) -> dict[str, str | None]:
 
 
 if __name__ == "__main__":
-    # Teste manual rápido: roda pro RU Saúde e Direito e imprime os dois HTMLs.
+    # Teste manual rápido: roda pro RU Setorial II e imprime os dois HTMLs.
     # Se travar, vai gerar debug_timeout_<refeicao>.png e .html na raiz do projeto.
-    restaurante_value = RESTAURANTES["RU Saúde e Direito"]
+    restaurante_value = RESTAURANTES["RU Setorial II"]
     cardapios = buscar_cardapio_completo(restaurante_value)
 
     for refeicao, html in cardapios.items():
         print(f"\n===== {refeicao} =====")
-        if html is None:
-            print("(sem cardápio cadastrado para essa refeição hoje)")
-        else:
-            print(html[:1000])  # só o começo, pra não poluir o terminal
+        print(html[:1000])  # só o começo, pra não poluir o terminal

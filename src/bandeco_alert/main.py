@@ -21,6 +21,7 @@ Local esperado deste arquivo no projeto:
 """
 
 import os
+import time
 
 from dotenv import load_dotenv
 
@@ -30,6 +31,13 @@ from bandeco_alert.parser import parse_cardapio_completo
 from bandeco_alert.scraper import RESTAURANTES, buscar_cardapio_completo
 
 load_dotenv()
+
+# Número de tentativas por restaurante antes de desistir. Falhas do tipo
+# "Chrome travou/não respondeu" costumam ser passageiras (instabilidade
+# do runner do GitHub Actions), então vale tentar de novo antes de
+# marcar como erro definitivo.
+MAX_TENTATIVAS = 3
+SEGUNDOS_ENTRE_TENTATIVAS = 10
 
 # Restaurantes que NÃO devem ser processados.
 RESTAURANTES_EXCLUIDOS = {"RU ICA"}
@@ -87,6 +95,29 @@ def processar_restaurante(nome_restaurante: str, restaurante_value: str) -> None
     print(f"{nome_restaurante}: concluído com sucesso!")
 
 
+def processar_restaurante_com_retry(nome_restaurante: str, restaurante_value: str) -> None:
+    """Chama processar_restaurante() com retry automático.
+
+    Tenta até MAX_TENTATIVAS vezes, com uma pequena pausa entre elas.
+    Se todas as tentativas falharem, a última exceção é relançada —
+    quem chama essa função (main()) decide o que fazer a partir daí.
+    """
+    for tentativa in range(1, MAX_TENTATIVAS + 1):
+        try:
+            processar_restaurante(nome_restaurante, restaurante_value)
+            return  # sucesso, não precisa tentar de novo
+        except Exception as erro:
+            if tentativa == MAX_TENTATIVAS:
+                raise  # última tentativa falhou, propaga o erro pra cima
+
+            print(
+                f"[AVISO] Tentativa {tentativa}/{MAX_TENTATIVAS} falhou para "
+                f"{nome_restaurante}: {erro}. Tentando de novo em "
+                f"{SEGUNDOS_ENTRE_TENTATIVAS}s..."
+            )
+            time.sleep(SEGUNDOS_ENTRE_TENTATIVAS)
+
+
 def main() -> None:
     erros: list[str] = []
 
@@ -98,11 +129,11 @@ def main() -> None:
 
     for nome_restaurante, restaurante_value in restaurantes_a_processar.items():
         try:
-            processar_restaurante(nome_restaurante, restaurante_value)
+            processar_restaurante_com_retry(nome_restaurante, restaurante_value)
         except Exception as erro:
             # Não deixamos um restaurante com problema (ex: site fora do
             # ar naquele momento) derrubar o envio dos outros restaurantes.
-            print(f"[ERRO] Falha ao processar {nome_restaurante}: {erro}")
+            print(f"[ERRO] Falha ao processar {nome_restaurante} após {MAX_TENTATIVAS} tentativas: {erro}")
             erros.append(nome_restaurante)
 
     if erros:
