@@ -28,6 +28,11 @@ jobs:
       - name: Instalar Chrome
         uses: browser-actions/setup-chrome@v1
 
+      - name: Verificar versão do Chrome
+        run: |
+          google-chrome --version
+          which google-chrome
+
       - name: Rodar o bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
