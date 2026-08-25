@@ -32,6 +32,10 @@ jobs:
         run: |
           google-chrome --version
           which google-chrome
+      
+      - name: Testar conectividade com o site
+        run: |
+          curl -v --max-time 15 https://fump.ufmg.br/cardapio-do-dia/ -o /dev/null
 
       - name: Rodar o bot
         env:
